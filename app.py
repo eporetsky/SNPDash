@@ -16,20 +16,21 @@ app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_
 
 # Global variables
 gwas_df = None
-trait_status = {}  # {trait: status}
-annotations = {}   # {trait: [list of annotations]}
+trait_data = {
+    'todo_list': [],
+    'skipped_list': [],
+    'done_list': [],
+    'traits': {}  # {trait: {'status': str, 'annotations': list, 'last_updated': str}}
+}
 genes_df = None
-trait_last_updated = {}  # {trait: timestamp}
 
 def load_gwas_results():
     """Load GWAS results from TSV file"""
-    print("Loading GWAS results...")
     df = pd.read_csv('input/combined.tsv', sep='\t', dtype={'CHROM': str, 'TRAIT': str})
     return df
 
 def load_gene_annotations():
     """Load gene annotations"""
-    print("Loading gene annotations...")
     
     # Load gene annotations with specific columns
     annot_df = pd.read_csv('annotation/ZmB73.annot.tsv', sep='\t', 
@@ -58,9 +59,9 @@ def load_gene_annotations():
     
     return gene_df
 
-def init_trait_status():
-    """Initialize trait status"""
-    global trait_status
+def init_trait_data():
+    """Initialize trait data structure"""
+    global trait_data
     traits = gwas_df['TRAIT'].dropna().unique()
     
     # Sort traits by their minimum p-value
@@ -73,70 +74,66 @@ def init_trait_status():
     # Sort traits by p-value (ascending)
     sorted_traits = [trait for trait, _ in sorted(trait_min_pvals, key=lambda x: x[1])]
     
-    trait_status = {
-        'Todo': {trait: 'Todo' for trait in sorted_traits},
-        'Done': {},
-        'Skipped': {},
-        '_order': {
-            'Todo': sorted_traits,
-            'Done': [],
-            'Skipped': []
-        }
+    # Initialize trait data
+    trait_data = {
+        'todo_list': sorted_traits,
+        'skipped_list': [],
+        'done_list': [],
+        'traits': {trait: {
+            'status': 'Todo',
+            'annotations': [],
+            'last_updated': datetime.now().isoformat()
+        } for trait in sorted_traits}
     }
-    save_trait_status()
+    save_trait_data()
 
-def save_trait_status():
-    """Save trait status to pickle file"""
-    with open('trait_status.pkl', 'wb') as f:
-        pickle.dump(trait_status, f)
+def save_trait_data():
+    """Save trait data to pickle file"""
+    with open('trait_data.pkl', 'wb') as f:
+        pickle.dump(trait_data, f)
 
-def load_trait_status():
-    """Load trait status from pickle file"""
-    global trait_status
-    if os.path.exists('trait_status.pkl'):
-        with open('trait_status.pkl', 'rb') as f:
-            old_status = pickle.load(f)
+def load_trait_data():
+    """Load trait data from pickle file"""
+    global trait_data
+    if os.path.exists('trait_data.pkl'):
+        with open('trait_data.pkl', 'rb') as f:
+            old_data = pickle.load(f)
             
             # Check if we need to migrate from old format
-            if isinstance(old_status, dict) and '_order' not in old_status:
-                print("Migrating old trait_status format to new format...")
-                new_status = {
-                    'Todo': {},
-                    'Done': {},
-                    'Skipped': {},
-                    '_order': {
-                        'Todo': [],
-                        'Done': [],
-                        'Skipped': []
-                    }
+            if isinstance(old_data, dict) and 'traits' not in old_data:
+                print("Migrating old data format to new format...")
+                new_data = {
+                    'todo_list': [],
+                    'skipped_list': [],
+                    'done_list': [],
+                    'traits': {}
                 }
                 
-                # Migrate traits to new format
-                for trait, status in old_status.items():
-                    if trait != '_trait_order_list':  # Skip old order list if it exists
-                        new_status[status][trait] = status
-                        new_status['_order'][status].append(trait)
+                # Migrate trait status
+                if isinstance(old_data, dict) and '_order' in old_data:
+                    for status in ['Todo', 'Done', 'Skipped']:
+                        new_data[f'{status.lower()}_list'] = old_data['_order'][status]
+                        for trait in old_data['_order'][status]:
+                            new_data['traits'][trait] = {
+                                'status': status,
+                                'annotations': [],
+                                'last_updated': datetime.now().isoformat()
+                            }
                 
-                trait_status = new_status
-                save_trait_status()
+                # Migrate annotations if they exist
+                if os.path.exists('annotations.pkl'):
+                    with open('annotations.pkl', 'rb') as f:
+                        annotations = pickle.load(f)
+                        for trait, ann_list in annotations.items():
+                            if trait in new_data['traits']:
+                                new_data['traits'][trait]['annotations'] = ann_list
+                
+                trait_data = new_data
+                save_trait_data()
             else:
-                trait_status = old_status
+                trait_data = old_data
     else:
-        init_trait_status()
-
-def save_annotations():
-    """Save annotations to pickle file"""
-    with open('annotations.pkl', 'wb') as f:
-        pickle.dump(annotations, f)
-
-def load_annotations():
-    """Load annotations from pickle file"""
-    global annotations
-    if os.path.exists('annotations.pkl'):
-        with open('annotations.pkl', 'rb') as f:
-            annotations = pickle.load(f)
-    else:
-        annotations = {}
+        init_trait_data()
 
 def get_trait_status(status_filter):
     """Get traits filtered by status"""
@@ -145,22 +142,22 @@ def get_trait_status(status_filter):
         
         if status_filter == 'All':
             all_traits = []
-            for status in ['Todo', 'Done', 'Skipped']:
-                all_traits.extend(trait_status['_order'][status])
+            for status in ['todo_list', 'skipped_list', 'done_list']:
+                all_traits.extend(trait_data[status])
             return all_traits
         
         # Get traits in their stored order
-        traits = trait_status['_order'][status_filter]
+        traits = trait_data[f'{status_filter.lower()}_list']
         
         # For Done and Skipped lists, show most recent first
         if status_filter in ['Done', 'Skipped']:
             traits = traits[::-1]  # Reverse the list
         
         print(f"Found {len(traits)} traits with status '{status_filter}'")
-        print(f"Total traits in database: {sum(len(trait_status[s]) for s in ['Todo', 'Done', 'Skipped'])}")
-        print(f"Status counts: Todo={len(trait_status['Todo'])}, "
-              f"Done={len(trait_status['Done'])}, "
-              f"Skipped={len(trait_status['Skipped'])}")
+        print(f"Total traits in database: {sum(len(trait_data[s]) for s in ['todo_list', 'skipped_list', 'done_list'])}")
+        print(f"Status counts: Todo={len(trait_data['todo_list'])}, "
+              f"Done={len(trait_data['done_list'])}, "
+              f"Skipped={len(trait_data['skipped_list'])}")
         
         if len(traits) == 0:
             print("WARNING: No traits found with requested status!")
@@ -180,26 +177,26 @@ def update_trait_status(trait, new_status):
         print(f"\nUpdating trait status: {trait} -> {new_status}")
         
         # Find current status
-        old_status = None
-        for status in ['Todo', 'Done', 'Skipped']:
-            if trait in trait_status[status]:
-                old_status = status
-                break
+        old_status = trait_data['traits'][trait]['status']
         
-        if old_status:
-            # Remove from old status
-            del trait_status[old_status][trait]
-            trait_status['_order'][old_status].remove(trait)
-            
-            # Add to new status
-            trait_status[new_status][trait] = new_status
-            trait_status['_order'][new_status].append(trait)
-            
-            print(f"Updated status for {trait} to {new_status}")
-            print(f"New status counts: Todo={len(trait_status['Todo'])}, "
-                  f"Done={len(trait_status['Done'])}, "
-                  f"Skipped={len(trait_status['Skipped'])}")
-            save_trait_status()
+        # Remove from old status list
+        old_list = f'{old_status.lower()}_list'
+        if trait in trait_data[old_list]:
+            trait_data[old_list].remove(trait)
+        
+        # Add to new status list
+        new_list = f'{new_status.lower()}_list'
+        trait_data[new_list].append(trait)
+        
+        # Update trait data
+        trait_data['traits'][trait]['status'] = new_status
+        trait_data['traits'][trait]['last_updated'] = datetime.now().isoformat()
+        
+        print(f"Updated status for {trait} to {new_status}")
+        print(f"New status counts: Todo={len(trait_data['todo_list'])}, "
+              f"Done={len(trait_data['done_list'])}, "
+              f"Skipped={len(trait_data['skipped_list'])}")
+        save_trait_data()
     except Exception as e:
         print(f"Error updating trait status: {str(e)}")
         print("Full traceback:")
@@ -209,15 +206,8 @@ def update_trait_status(trait, new_status):
 def save_annotation(trait, snp_info, selected_genes):
     """Save annotation"""
     try:
-        print(f"\nSaving annotation for trait: {trait}")
-        print(f"SNP info: {snp_info}")
-        print(f"Number of genes to save: {len(selected_genes)}")
-        
-        if trait not in annotations:
-            annotations[trait] = []
-        
         # Get existing gene IDs for this trait
-        existing_gene_ids = {ann['gene_id'] for ann in annotations[trait]}
+        existing_gene_ids = {ann['gene_id'] for ann in trait_data['traits'][trait]['annotations']}
         
         # Filter out duplicates
         new_annotations = []
@@ -235,14 +225,14 @@ def save_annotation(trait, snp_info, selected_genes):
                     'computational_description': gene['computational_description'],
                     'defline': gene['defline']
                 }
-                annotations[trait].append(annotation)
+                trait_data['traits'][trait]['annotations'].append(annotation)
                 existing_gene_ids.add(gene['gene_id'])  # Add to set to prevent future duplicates
                 new_annotations.append(annotation)
                 print(f"Added annotation for gene: {gene['gene_id']}")
             else:
                 print(f"Skipped duplicate gene: {gene['gene_id']}")
 
-        save_annotations()
+        save_trait_data()
         print(f"Saved {len(new_annotations)} new annotations for trait {trait}")
     except Exception as e:
         print(f"Error in save_annotation: {str(e)}")
@@ -252,7 +242,7 @@ def save_annotation(trait, snp_info, selected_genes):
 
 def get_annotations(trait):
     """Get annotations for a trait"""
-    return annotations.get(trait, [])
+    return trait_data['traits'][trait]['annotations']
 
 def create_empty_manhattan_plot():
     """Create an empty Manhattan plot"""
@@ -396,7 +386,47 @@ def create_manhattan_plot(selected_trait):
 def create_nearby_genes_table(snp_info):
     """Create table of nearby genes"""
     if snp_info is None:
-        return "No SNP selected"
+        return dash_table.DataTable(
+            id='genes-table',
+            columns=[
+                {'name': 'Gene ID', 'id': 'gene_id'},
+                {'name': 'Name', 'id': 'name'},
+                {'name': 'Location', 'id': 'location'},
+                {'name': 'Distance (bp)', 'id': 'distance'},
+                {'name': 'Short Description', 'id': 'short_description'},
+                {'name': 'Curator Summary', 'id': 'curator_summary'},
+                {'name': 'Computational Description', 'id': 'computational_description'},
+                {'name': 'Defline', 'id': 'defline'}
+            ],
+            data=[],
+            row_selectable='multi',
+            selected_rows=[],
+            page_size=10,
+            style_table={'overflowX': 'auto'},
+            style_cell={
+                'textAlign': 'left',
+                'padding': '8px',
+                'whiteSpace': 'normal',
+                'height': 'auto',
+                'fontSize': '0.9rem',
+                'backgroundColor': '#ffffff',
+                'color': '#2c3e50'
+            },
+            style_header={
+                'backgroundColor': '#6495ED',
+                'color': 'white',
+                'fontWeight': 'bold',
+                'fontSize': '0.9rem'
+            },
+            style_data_conditional=[
+                {
+                    'if': {'row_index': 'odd'},
+                    'backgroundColor': '#f8f9fa'
+                }
+            ],
+            persistence=True,
+            persistence_type='local'
+        )
     
     chrom = str(snp_info['CHROM'])
     pos = int(snp_info['POS'])
@@ -412,7 +442,47 @@ def create_nearby_genes_table(snp_info):
     ].copy()
     
     if len(nearby_genes) == 0:
-        return "No genes found within 100kb"
+        return dash_table.DataTable(
+            id='genes-table',
+            columns=[
+                {'name': 'Gene ID', 'id': 'gene_id'},
+                {'name': 'Name', 'id': 'name'},
+                {'name': 'Location', 'id': 'location'},
+                {'name': 'Distance (bp)', 'id': 'distance'},
+                {'name': 'Short Description', 'id': 'short_description'},
+                {'name': 'Curator Summary', 'id': 'curator_summary'},
+                {'name': 'Computational Description', 'id': 'computational_description'},
+                {'name': 'Defline', 'id': 'defline'}
+            ],
+            data=[],
+            row_selectable='multi',
+            selected_rows=[],
+            page_size=10,
+            style_table={'overflowX': 'auto'},
+            style_cell={
+                'textAlign': 'left',
+                'padding': '8px',
+                'whiteSpace': 'normal',
+                'height': 'auto',
+                'fontSize': '0.9rem',
+                'backgroundColor': '#ffffff',
+                'color': '#2c3e50'
+            },
+            style_header={
+                'backgroundColor': '#6495ED',
+                'color': 'white',
+                'fontWeight': 'bold',
+                'fontSize': '0.9rem'
+            },
+            style_data_conditional=[
+                {
+                    'if': {'row_index': 'odd'},
+                    'backgroundColor': '#f8f9fa'
+                }
+            ],
+            persistence=True,
+            persistence_type='local'
+        )
     
     # Calculate distances
     nearby_genes['distance'] = nearby_genes.apply(
@@ -464,6 +534,60 @@ def create_nearby_genes_table(snp_info):
             'color': '#2c3e50'
         },
         style_header={
+            'backgroundColor': '#6495ED',
+            'color': 'white',
+            'fontWeight': 'bold',
+            'fontSize': '0.9rem'
+        },
+        style_data_conditional=[
+            {
+                'if': {'row_index': 'odd'},
+                'backgroundColor': '#f8f9fa'
+            }
+        ],
+        persistence=True,
+        persistence_type='local'
+    )
+
+def update_annotations_table(selected_trait):
+    """Update the annotations table for the selected trait"""
+    if not selected_trait or selected_trait == "No traits available":
+        return "No trait selected"
+    
+    annotations_list = get_annotations(selected_trait)
+    
+    if not annotations_list:
+        return "No annotations for this trait"
+    
+    return dash_table.DataTable(
+        id='annotations-table',
+        columns=[
+            {'name': 'Chromosome', 'id': 'chromosome'},
+            {'name': 'Position', 'id': 'position'},
+            {'name': 'P-value', 'id': 'p_value'},
+            {'name': 'Gene ID', 'id': 'gene_id'},
+            {'name': 'Gene Name', 'id': 'gene_name'},
+            {'name': 'Distance', 'id': 'distance'},
+            {'name': 'Short Description', 'id': 'short_description'},
+            {'name': 'Curator Summary', 'id': 'curator_summary'},
+            {'name': 'Computational Description', 'id': 'computational_description'},
+            {'name': 'Defline', 'id': 'defline'}
+        ],
+        data=annotations_list,
+        row_selectable='multi',
+        selected_rows=[],
+        page_size=10,
+        style_table={'overflowX': 'auto'},
+        style_cell={
+            'textAlign': 'left',
+            'padding': '8px',
+            'whiteSpace': 'normal',
+            'height': 'auto',
+            'fontSize': '0.9rem',
+            'backgroundColor': '#ffffff',
+            'color': '#2c3e50'
+        },
+        style_header={
             'backgroundColor': '#6495ED',  # Cornflower blue
             'color': 'white',
             'fontWeight': 'bold',
@@ -487,8 +611,7 @@ try:
     genes_df = load_gene_annotations()
     print(f"Loaded {len(genes_df)} gene annotations")
     
-    load_trait_status()
-    load_annotations()
+    load_trait_data()
 except Exception as e:
     print(f"Error during initialization: {str(e)}")
     import traceback
@@ -667,7 +790,7 @@ app.layout = html.Div([
         ]),
         
         # Store selected genes and current SNP
-        dcc.Store(id='selected-genes-store'),
+        dcc.Store(id='selected-genes-store', data={'selected_rows': [], 'data': []}),
         dcc.Store(id='current-snp-store')
     ], fluid=True, style={'backgroundColor': '#f8f9fa', 'padding': '20px'})
 ])
@@ -675,62 +798,194 @@ app.layout = html.Div([
 @app.callback(
     [Output('current-trait-display', 'children'),
      Output('manhattan-plot', 'figure'),
-     Output('manhattan-plot', 'selectedData')],
-    Input('status-filter', 'value'),
-    prevent_initial_call=False
-)
-def initialize_trait(status_filter):
-    """Initialize the first trait when the app loads"""
-    print("\nInitializing first trait...")
-    traits = get_trait_status(status_filter)
-    if not traits:
-        print("No traits available for initialization")
-        return "No traits available", create_empty_manhattan_plot(), None
-    print(f"Initializing with first trait: {traits[0]}")
-    return traits[0], create_manhattan_plot(traits[0]), None
-
-@app.callback(
-    [Output('current-trait-display', 'children', allow_duplicate=True),
-     Output('manhattan-plot', 'figure', allow_duplicate=True),
-     Output('manhattan-plot', 'selectedData', allow_duplicate=True)],
+     Output('manhattan-plot', 'selectedData'),
+     Output('nearby-genes-table', 'children'),
+     Output('current-snp-store', 'data'),
+     Output('trait-annotations-table', 'children'),
+     Output('status-counter', 'children'),
+     Output("toast", "is_open"),
+     Output("toast", "children")],
     [Input('next-trait-btn', 'n_clicks'),
      Input('prev-trait-btn', 'n_clicks'),
      Input('skip-trait-btn', 'n_clicks'),
      Input('mark-undone-btn', 'n_clicks'),
-     Input('done-trait-btn', 'n_clicks')],
+     Input('done-trait-btn', 'n_clicks'),
+     Input('save-genes-btn', 'n_clicks'),
+     Input('clear-annotations-btn', 'n_clicks'),
+     Input('export-csv-btn', 'n_clicks'),
+     Input('status-filter', 'value'),
+     Input('manhattan-plot', 'selectedData')],
     [State('current-trait-display', 'children'),
-     State('status-filter', 'value'),
-     State('genes-table', 'selected_rows'),
-     State('genes-table', 'data'),
+     State('nearby-genes-table', 'children'),
      State('current-snp-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
-def update_trait_and_plot(n_clicks_next, n_clicks_prev, n_clicks_skip, n_clicks_undone, n_clicks_done, 
-                         current_trait, status_filter, selected_rows, genes_data, current_snp):
+def unified_callback(n_clicks_next, n_clicks_prev, n_clicks_skip, n_clicks_undone, n_clicks_done,
+                    n_clicks_save, n_clicks_clear, n_clicks_export, status_filter, selected_data,
+                    current_trait, genes_table, current_snp):
     try:
-        print(f"\nUpdating trait and plot...")
-        print(f"Status filter: {status_filter}")
-        print(f"Current trait: {current_trait}")
-        
+        print("\nUnified callback triggered...")
         ctx = dash.callback_context
         if not ctx.triggered:
-            return dash.no_update, dash.no_update, dash.no_update
-        
+            # Initial load - return first trait
+            traits = get_trait_status(status_filter)
+            if not traits:
+                return "No traits available", create_empty_manhattan_plot(), None, "No trait selected", None, "No trait selected", get_status_counter_text(), False, ""
+            
+            # Get the first trait and its best SNP
+            first_trait = traits[0]
+            trait_df = gwas_df[gwas_df['TRAIT'] == first_trait]
+            best_snp = trait_df.loc[trait_df['PVAL'].idxmin()]
+            
+            # Create initial SNP selection
+            initial_snp = {
+                'chrom': best_snp['CHROM'],
+                'pos': best_snp['POS'],
+                'pval': best_snp['PVAL'],
+                'trait': first_trait
+            }
+            
+            # Create initial selected data for the plot
+            initial_selected_data = {
+                'points': [{
+                    'customdata': [best_snp['CHROM'], best_snp['POS'], best_snp['PVAL']]
+                }]
+            }
+            
+            return (first_trait, 
+                   create_manhattan_plot(first_trait), 
+                   initial_selected_data,
+                   create_nearby_genes_table({'CHROM': best_snp['CHROM'], 'POS': best_snp['POS'], 'PVAL': best_snp['PVAL']}),
+                   initial_snp,
+                   update_annotations_table(first_trait),
+                   get_status_counter_text(),
+                   False, "")
+
         button_id = ctx.triggered[0]['prop_id'].split('.')[0]
         print(f"Button triggered: {button_id}")
-        
-        # Handle Done button with gene selection
-        if button_id == 'done-trait-btn':
-            if not selected_rows or not genes_data or not current_snp:
-                print("Cannot mark as done: No genes selected or no gene data available")
-                return dash.no_update, dash.no_update, dash.no_update
+
+        # Extract selected rows and data from the table
+        selected_rows = []
+        genes_data = []
+        if isinstance(genes_table, dict) and 'props' in genes_table:
+            selected_rows = genes_table['props'].get('selected_rows', [])
+            genes_data = genes_table['props'].get('data', [])
+        print(f"Selected rows: {selected_rows}")
+        print(f"Genes data: {genes_data}")
+
+        # Handle status filter change
+        if button_id == 'status-filter':
+            traits = get_trait_status(status_filter)
+            if not traits:
+                return "No traits available", create_empty_manhattan_plot(), None, "No trait selected", None, "No trait selected", get_status_counter_text(), False, ""
             
-            # Save selected genes first
+            # Get the first trait and its best SNP
+            first_trait = traits[0]
+            trait_df = gwas_df[gwas_df['TRAIT'] == first_trait]
+            best_snp = trait_df.loc[trait_df['PVAL'].idxmin()]
+            
+            # Create initial SNP selection
+            initial_snp = {
+                'chrom': best_snp['CHROM'],
+                'pos': best_snp['POS'],
+                'pval': best_snp['PVAL'],
+                'trait': first_trait
+            }
+            
+            # Create initial selected data for the plot
+            initial_selected_data = {
+                'points': [{
+                    'customdata': [best_snp['CHROM'], best_snp['POS'], best_snp['PVAL']]
+                }]
+            }
+            
+            return (first_trait, 
+                   create_manhattan_plot(first_trait), 
+                   initial_selected_data,
+                   create_nearby_genes_table({'CHROM': best_snp['CHROM'], 'POS': best_snp['POS'], 'PVAL': best_snp['PVAL']}),
+                   initial_snp,
+                   update_annotations_table(first_trait),
+                   get_status_counter_text(),
+                   False, "")
+
+        # Handle Manhattan plot selection
+        if button_id == 'manhattan-plot':
+            if not current_trait or current_trait == "No traits available":
+                return dash.no_update, dash.no_update, dash.no_update, "No trait selected", None, "No trait selected", dash.no_update, False, ""
+            
+            if not selected_data or not selected_data['points']:
+                trait_df = gwas_df[gwas_df['TRAIT'] == current_trait]
+                if len(trait_df) == 0:
+                    return dash.no_update, dash.no_update, dash.no_update, "No data available for this trait", None, dash.no_update, dash.no_update, False, ""
+                
+                best_snp = trait_df.loc[trait_df['PVAL'].idxmin()]
+                point = {
+                    'customdata': [best_snp['CHROM'], best_snp['POS'], best_snp['PVAL']]
+                }
+            else:
+                point = selected_data['points'][0]
+            
+            chrom = point['customdata'][0]
+            pos = point['customdata'][1]
+            pval = point['customdata'][2]
+            
+            current_snp = {
+                'chrom': chrom,
+                'pos': pos,
+                'pval': pval,
+                'trait': current_trait
+            }
+            
+            genes_table = create_nearby_genes_table({
+                'CHROM': chrom,
+                'POS': pos,
+                'PVAL': pval
+            })
+            
+            return dash.no_update, dash.no_update, dash.no_update, genes_table, current_snp, update_annotations_table(current_trait), dash.no_update, False, ""
+
+        # Handle trait navigation and status updates
+        traits = get_trait_status(status_filter)
+        if not traits:
+            return "No traits available", create_empty_manhattan_plot(), None, "No trait selected", None, "No trait selected", get_status_counter_text(), False, ""
+
+        if not current_trait or current_trait not in traits:
+            return traits[0], create_manhattan_plot(traits[0]), None, "No trait selected", None, "No trait selected", get_status_counter_text(), False, ""
+
+        current_index = traits.index(current_trait)
+        new_trait = current_trait
+        show_toast = False
+        toast_message = ""
+
+        # Handle different button actions
+        if button_id == 'next-trait-btn':
+            next_index = (current_index + 1) % len(traits)
+            new_trait = traits[next_index]
+        elif button_id == 'prev-trait-btn':
+            prev_index = (current_index - 1) % len(traits)
+            new_trait = traits[prev_index]
+        elif button_id == 'skip-trait-btn':
+            update_trait_status(current_trait, 'Skipped')
+            traits = get_trait_status(status_filter)
+            new_trait = traits[0] if traits else "No traits available"
+        elif button_id == 'mark-undone-btn':
+            if current_trait in trait_data['traits']:
+                trait_data['traits'][current_trait]['annotations'] = []
+                save_trait_data()
+            update_trait_status(current_trait, 'Todo')
+            traits = get_trait_status(status_filter)
+            new_trait = traits[0] if traits else "No traits available"
+        elif button_id == 'done-trait-btn':
+            print(f"Done button clicked. Selected rows: {selected_rows}, Genes data: {genes_data}")
+            if not selected_rows or not genes_data or not current_snp:
+                show_toast = True
+                toast_message = "Please select at least one gene before marking the trait as done."
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, show_toast, toast_message
+            
             selected_genes = []
             for row_idx in selected_rows:
                 if row_idx < len(genes_data):
                     gene = genes_data[row_idx]
-                    print(f"Processing gene: {gene['gene_id']}")
                     selected_genes.append({
                         'gene_id': gene['gene_id'],
                         'name': gene['name'],
@@ -742,304 +997,108 @@ def update_trait_and_plot(n_clicks_next, n_clicks_prev, n_clicks_skip, n_clicks_
                     })
             
             if selected_genes:
-                print(f"Saving {len(selected_genes)} genes for trait {current_trait}")
                 save_annotation(current_trait, current_snp, selected_genes)
-                print("Genes saved successfully")
-                
-                # Now mark as done and move to next trait
-                print(f"Marking trait as done: {current_trait}")
-                update_trait_status(current_trait, 'Done')
-                traits = get_trait_status(status_filter)
-                if len(traits) == 0:
-                    print("No traits available after marking done")
-                    return "No traits available", create_empty_manhattan_plot(), None
-                new_trait = traits[0]
-                print(f"Moving to next trait after marking done: {new_trait}")
-                return new_trait, create_manhattan_plot(new_trait), None
-            else:
-                print("No genes to save")
-                return dash.no_update, dash.no_update, dash.no_update
-        
-        traits = get_trait_status(status_filter)
-        print(f"Found {len(traits)} traits for status {status_filter}")
-        
-        if len(traits) == 0:
-            print("No traits available")
-            return "No traits available", create_empty_manhattan_plot(), None
-        
-        if not current_trait or current_trait not in traits:
-            print(f"Current trait {current_trait} not found in traits list, returning first trait")
-            return traits[0], create_manhattan_plot(traits[0]), None
-        
-        current_index = traits.index(current_trait)
-        print(f"Current index: {current_index}")
-        
-        if button_id == 'next-trait-btn':
-            next_index = (current_index + 1) % len(traits)
-            new_trait = traits[next_index]
-            print(f"Moving to next trait: {new_trait}")
-        elif button_id == 'prev-trait-btn':
-            prev_index = (current_index - 1) % len(traits)
-            new_trait = traits[prev_index]
-            print(f"Moving to previous trait: {new_trait}")
-        elif button_id == 'skip-trait-btn':
-            print(f"Skipping trait: {current_trait}")
-            update_trait_status(current_trait, 'Skipped')
+                save_trait_data()  # Make sure to save after adding annotations
+            
+            update_trait_status(current_trait, 'Done')
             traits = get_trait_status(status_filter)
-            if len(traits) == 0:
-                print("No traits available after skipping")
-                return "No traits available", create_empty_manhattan_plot(), None
-            new_trait = traits[0]
-            print(f"Moving to next trait after skip: {new_trait}")
-        elif button_id == 'mark-undone-btn':
-            print(f"Marking trait as undone: {current_trait}")
-            # Clear annotations for this trait
-            if current_trait in annotations:
-                print(f"Clearing {len(annotations[current_trait])} annotations for trait {current_trait}")
-                annotations[current_trait] = []
-                save_annotations()
-            update_trait_status(current_trait, 'Todo')
-            traits = get_trait_status(status_filter)
-            if len(traits) == 0:
-                print("No traits available after marking undone")
-                return "No traits available", create_empty_manhattan_plot(), None
-            new_trait = traits[0]
-            print(f"Moving to next trait after marking undone: {new_trait}")
-        else:
-            print(f"Unknown button: {button_id}")
-            return dash.no_update, dash.no_update, dash.no_update
-        
-        return new_trait, create_manhattan_plot(new_trait), None
-    except Exception as e:
-        print(f"Error in update_trait_and_plot: {str(e)}")
-        print("Full traceback:")
-        import traceback
-        print(traceback.format_exc())
-        return "Error occurred", create_empty_manhattan_plot(), None
+            new_trait = traits[0] if traits else "No traits available"
+        elif button_id == 'save-genes-btn':
+            print(f"Save button clicked. Selected rows: {selected_rows}, Genes data: {genes_data}")
+            if not selected_rows or not genes_data or not current_snp:
+                show_toast = True
+                toast_message = "Please select at least one gene to save."
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, show_toast, toast_message
+            
+            selected_genes = []
+            for row_idx in selected_rows:
+                if row_idx < len(genes_data):
+                    gene = genes_data[row_idx]
+                    selected_genes.append({
+                        'gene_id': gene['gene_id'],
+                        'name': gene['name'],
+                        'distance': gene['distance'],
+                        'short_description': gene['short_description'],
+                        'curator_summary': gene['curator_summary'],
+                        'computational_description': gene['computational_description'],
+                        'defline': gene['defline']
+                    })
+            
+            if selected_genes:
+                save_annotation(current_trait, current_snp, selected_genes)
+                save_trait_data()  # Make sure to save after adding annotations
+                show_toast = False
+                toast_message = f"Saved {len(selected_genes)} genes for {current_trait}"
+            
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, update_annotations_table(current_trait), dash.no_update, show_toast, toast_message
+        elif button_id == 'clear-annotations-btn':
+            if current_trait in trait_data['traits']:
+                trait_data['traits'][current_trait]['annotations'] = []
+                save_trait_data()
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, update_annotations_table(current_trait), dash.no_update, False, ""
+        elif button_id == 'export-csv-btn':
+            rows = []
+            for trait, trait_info in trait_data['traits'].items():
+                for ann in trait_info['annotations']:
+                    row = ann.copy()
+                    row['trait'] = trait
+                    rows.append(row)
+            
+            if rows:
+                df = pd.DataFrame(rows)
+                cols = ['trait'] + [col for col in df.columns if col != 'trait']
+                df = df[cols]
+                df.to_csv('annotations.csv', index=False)
+                show_toast = True
+                toast_message = f"Exported {len(rows)} annotations to annotations.csv"
+            
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, show_toast, toast_message
 
-@app.callback(
-    [Output('nearby-genes-table', 'children'),
-     Output('current-snp-store', 'data')],
-    [Input('manhattan-plot', 'selectedData'),
-     Input('current-trait-display', 'children')]
-)
-def update_nearby_genes(selected_data, selected_trait):
-    if not selected_trait or selected_trait == "No traits available":
-        return "No trait selected", None
-    
-    if not selected_data or not selected_data['points']:
-        trait_data = gwas_df[gwas_df['TRAIT'] == selected_trait]
-        if len(trait_data) == 0:
-            return "No data available for this trait", None
+        # Update all outputs based on the new trait
+        if new_trait == "No traits available":
+            return new_trait, create_empty_manhattan_plot(), None, "No trait selected", None, "No trait selected", get_status_counter_text(), show_toast, toast_message
         
-        best_snp = trait_data.loc[trait_data['PVAL'].idxmin()]
-        point = {
-            'customdata': [best_snp['CHROM'], best_snp['POS'], best_snp['PVAL']]
+        # Get the best SNP for the new trait
+        trait_df = gwas_df[gwas_df['TRAIT'] == new_trait]
+        best_snp = trait_df.loc[trait_df['PVAL'].idxmin()]
+        
+        # Create SNP selection
+        new_snp = {
+            'chrom': best_snp['CHROM'],
+            'pos': best_snp['POS'],
+            'pval': best_snp['PVAL'],
+            'trait': new_trait
         }
-    else:
-        point = selected_data['points'][0]
-    
-    chrom = point['customdata'][0]
-    pos = point['customdata'][1]
-    pval = point['customdata'][2]
-    
-    current_snp = {
-        'chrom': chrom,
-        'pos': pos,
-        'pval': pval,
-        'trait': selected_trait
-    }
-    
-    genes_table = create_nearby_genes_table({
-        'CHROM': chrom,
-        'POS': pos,
-        'PVAL': pval
-    })
-    
-    return genes_table, current_snp
+        
+        # Create selected data for the plot
+        selected_data = {
+            'points': [{
+                'customdata': [best_snp['CHROM'], best_snp['POS'], best_snp['PVAL']]
+            }]
+        }
+        
+        return (new_trait, 
+               create_manhattan_plot(new_trait), 
+               selected_data,
+               create_nearby_genes_table({'CHROM': best_snp['CHROM'], 'POS': best_snp['POS'], 'PVAL': best_snp['PVAL']}),
+               new_snp,
+               update_annotations_table(new_trait),
+               get_status_counter_text(),
+               show_toast, 
+               toast_message)
 
-@app.callback(
-    Output('trait-annotations-table', 'children'),
-    [Input('current-trait-display', 'children')]
-)
-def update_annotations_table(selected_trait):
-    if not selected_trait or selected_trait == "No traits available":
-        return "No trait selected"
-    
-    annotations_list = get_annotations(selected_trait)
-    
-    if not annotations_list:
-        return "No annotations for this trait"
-    
-    return dash_table.DataTable(
-        id='annotations-table',
-        columns=[
-            {'name': 'Chromosome', 'id': 'chromosome'},
-            {'name': 'Position', 'id': 'position'},
-            {'name': 'P-value', 'id': 'p_value'},
-            {'name': 'Gene ID', 'id': 'gene_id'},
-            {'name': 'Gene Name', 'id': 'gene_name'},
-            {'name': 'Distance', 'id': 'distance'},
-            {'name': 'Short Description', 'id': 'short_description'},
-            {'name': 'Curator Summary', 'id': 'curator_summary'},
-            {'name': 'Computational Description', 'id': 'computational_description'},
-            {'name': 'Defline', 'id': 'defline'}
-        ],
-        data=annotations_list,
-        row_selectable='multi',
-        selected_rows=[],
-        page_size=10,
-        style_table={'overflowX': 'auto'},
-        style_cell={
-            'textAlign': 'left',
-            'padding': '8px',
-            'whiteSpace': 'normal',
-            'height': 'auto',
-            'fontSize': '0.9rem',
-            'backgroundColor': '#ffffff',
-            'color': '#2c3e50'
-        },
-        style_header={
-            'backgroundColor': '#6495ED',  # Cornflower blue
-            'color': 'white',
-            'fontWeight': 'bold',
-            'fontSize': '0.9rem'
-        },
-        style_data_conditional=[
-            {
-                'if': {'row_index': 'odd'},
-                'backgroundColor': '#f8f9fa'
-            }
-        ]
-    )
-
-@app.callback(
-    Output('trait-annotations-table', 'children', allow_duplicate=True),
-    Input('clear-annotations-btn', 'n_clicks'),
-    State('current-trait-display', 'children'),
-    prevent_initial_call=True
-)
-def clear_annotations(n_clicks, selected_trait):
-    if not n_clicks or not selected_trait:
-        raise dash.exceptions.PreventUpdate
-    
-    if selected_trait in annotations:
-        print(f"Clearing all annotations for trait {selected_trait}")
-        annotations[selected_trait] = []
-        save_annotations()
-    
-    return update_annotations_table(selected_trait)
-
-@app.callback(
-    Output('export-csv-btn', 'n_clicks'),
-    Input('export-csv-btn', 'n_clicks'),
-    prevent_initial_call=True
-)
-def handle_export(n_clicks):
-    if not n_clicks:
-        return dash.no_update
-    
-    # Convert annotations to DataFrame
-    rows = []
-    for trait, trait_annotations in annotations.items():
-        for ann in trait_annotations:
-            row = ann.copy()
-            row['trait'] = trait
-            rows.append(row)
-    
-    if not rows:
-        return dash.no_update
-    
-    df = pd.DataFrame(rows)
-    # Reorder columns to put trait first
-    cols = ['trait'] + [col for col in df.columns if col != 'trait']
-    df = df[cols]
-    csv_file = 'annotations.csv'
-    df.to_csv(csv_file, index=False)
-    return dash.no_update
-
-@app.callback(
-    Output('trait-annotations-table', 'children', allow_duplicate=True),
-    Input('save-genes-btn', 'n_clicks'),
-    [State('genes-table', 'selected_rows'),
-     State('genes-table', 'data'),
-     State('current-snp-store', 'data'),
-     State('current-trait-display', 'children')],
-    prevent_initial_call=True
-)
-def save_selected_genes(n_clicks_save, selected_rows, genes_data, current_snp, selected_trait):
-    try:
-        print("\nAttempting to save selected genes...")
-        print(f"Save button clicks: {n_clicks_save}")
-        print(f"Current SNP: {current_snp}")
-        print(f"Selected trait: {selected_trait}")
-        print(f"Selected rows: {selected_rows}")
-        print(f"Genes data available: {genes_data is not None}")
-        
-        if not n_clicks_save or not current_snp or not selected_trait:
-            print("Missing required data for saving")
-            raise dash.exceptions.PreventUpdate
-        
-        if not selected_rows or not genes_data:
-            print("No genes selected or no gene data available")
-            return update_annotations_table(selected_trait)
-        
-        selected_genes = []
-        for row_idx in selected_rows:
-            if row_idx < len(genes_data):
-                gene = genes_data[row_idx]
-                print(f"Processing gene: {gene['gene_id']}")
-                selected_genes.append({
-                    'gene_id': gene['gene_id'],
-                    'name': gene['name'],
-                    'distance': gene['distance'],
-                    'short_description': gene['short_description'],
-                    'curator_summary': gene['curator_summary'],
-                    'computational_description': gene['computational_description'],
-                    'defline': gene['defline']
-                })
-        
-        if selected_genes:
-            print(f"Saving {len(selected_genes)} genes for trait {selected_trait}")
-            save_annotation(selected_trait, current_snp, selected_genes)
-            print("Genes saved successfully")
-        else:
-            print("No genes to save")
-        
-        return update_annotations_table(selected_trait)
     except Exception as e:
-        print(f"Error in save_selected_genes: {str(e)}")
+        print(f"Error in unified_callback: {str(e)}")
         print("Full traceback:")
         import traceback
         print(traceback.format_exc())
-        return update_annotations_table(selected_trait)
+        return "Error occurred", create_empty_manhattan_plot(), None, "Error occurred", None, "Error occurred", get_status_counter_text(), True, f"An error occurred: {str(e)}"
 
-@app.callback(
-    Output("toast", "is_open"),
-    Output("toast", "children"),
-    [Input('done-trait-btn', 'n_clicks')],
-    [State('current-trait-display', 'children'),
-     State('genes-table', 'selected_rows'),
-     State('genes-table', 'data')],
-    prevent_initial_call=True
-)
-def show_done_warning(n_clicks, selected_trait, selected_rows, genes_data):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    
-    if not selected_rows or not genes_data:
-        return True, "Please select at least one gene before marking the trait as done."
-    
-    return False, ""
-
-@app.callback(
-    Output('status-counter', 'children'),
-    Input('status-filter', 'value')
-)
-def update_status_counter(status_filter):
-    todo_count = len(trait_status['Todo'])
-    done_count = len(trait_status['Done'])
-    skipped_count = len(trait_status['Skipped'])
+def get_status_counter_text():
+    """Helper function to get the status counter text"""
+    todo_count = len(trait_data['todo_list'])
+    done_count = len(trait_data['done_list'])
+    skipped_count = len(trait_data['skipped_list'])
     total_count = todo_count + done_count + skipped_count
     
     return f"Total: {total_count} | Todo: {todo_count} | Done: {done_count} | Skipped: {skipped_count}"
