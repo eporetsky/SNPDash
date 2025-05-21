@@ -24,9 +24,32 @@ trait_data = {
 }
 genes_df = None
 
+
+
 def load_gwas_results():
     """Load GWAS results from TSV file"""
-    df = pd.read_csv('input/combined.tsv', sep='\t', dtype={'CHROM': str, 'TRAIT': str})
+    print("Loading GWAS results...")
+    df = pd.read_csv('input/combined.all.tsv', sep='\t', dtype={'CHROM': str, 'TRAIT': str})
+    print(f"Loaded {len(df)} rows")
+    print(f"Unique traits: {len(df['TRAIT'].unique())}")
+    print("Sample of traits:")
+    print(df['TRAIT'].head())
+    
+    # Check for any NaN values in TRAIT column
+    nan_traits = df[df['TRAIT'].isna()]
+    if len(nan_traits) > 0:
+        print(f"Warning: Found {len(nan_traits)} rows with NaN traits")
+    
+    # Check for any empty strings in TRAIT column
+    empty_traits = df[df['TRAIT'] == '']
+    if len(empty_traits) > 0:
+        print(f"Warning: Found {len(empty_traits)} rows with empty trait names")
+    
+    # Remove any rows with NaN or empty trait names
+    df = df.dropna(subset=['TRAIT'])
+    df = df[df['TRAIT'] != '']
+    
+    print(f"After cleaning: {len(df)} rows")
     return df
 
 def load_gene_annotations():
@@ -67,9 +90,10 @@ def init_trait_data():
     # Sort traits by their minimum p-value
     trait_min_pvals = []
     for trait in traits:
-        trait_data = gwas_df[gwas_df['TRAIT'] == trait]
-        min_pval = trait_data['PVAL'].min()
-        trait_min_pvals.append((trait, min_pval))
+        trait_df = gwas_df[gwas_df['TRAIT'] == trait]
+        if len(trait_df) > 0:  # Only include traits that have data
+            min_pval = trait_df['PVAL'].min()
+            trait_min_pvals.append((trait, min_pval))
     
     # Sort traits by p-value (ascending)
     sorted_traits = [trait for trait, _ in sorted(trait_min_pvals, key=lambda x: x[1])]
@@ -161,6 +185,13 @@ def get_trait_status(status_filter):
         
         if len(traits) == 0:
             print("WARNING: No traits found with requested status!")
+            # If no traits found, try to reinitialize
+            print("Attempting to reinitialize trait data...")
+            init_trait_data()
+            traits = trait_data[f'{status_filter.lower()}_list']
+            if status_filter in ['Done', 'Skipped']:
+                traits = traits[::-1]
+            print(f"After reinitialization: {len(traits)} traits found")
         
         print("First few filtered traits:", traits[:5])
         return traits
@@ -423,20 +454,18 @@ def create_nearby_genes_table(snp_info):
                     'if': {'row_index': 'odd'},
                     'backgroundColor': '#f8f9fa'
                 }
-            ],
-            persistence=True,
-            persistence_type='local'
+            ]
         )
     
     chrom = str(snp_info['CHROM'])
-    pos = int(snp_info['POS'])
+    pos = int(snp_info['POS']) #
     
     # Find nearby genes
     nearby_genes = genes_df[
         (genes_df['chrom'] == chrom) & 
         (
-            (genes_df['start'].between(pos-100000, pos+100000)) |
-            (genes_df['end'].between(pos-100000, pos+100000)) |
+            (genes_df['start'].between(pos-200000, pos+200000)) |
+            (genes_df['end'].between(pos-200000, pos+200000)) |
             ((genes_df['start'] <= pos) & (genes_df['end'] >= pos))
         )
     ].copy()
@@ -479,9 +508,7 @@ def create_nearby_genes_table(snp_info):
                     'if': {'row_index': 'odd'},
                     'backgroundColor': '#f8f9fa'
                 }
-            ],
-            persistence=True,
-            persistence_type='local'
+            ]
         )
     
     # Calculate distances
@@ -521,7 +548,7 @@ def create_nearby_genes_table(snp_info):
         ],
         data=rows,
         row_selectable='multi',
-        selected_rows=[],
+        selected_rows=[0] if rows else [],
         page_size=10,
         style_table={'overflowX': 'auto'},
         style_cell={
@@ -544,9 +571,7 @@ def create_nearby_genes_table(snp_info):
                 'if': {'row_index': 'odd'},
                 'backgroundColor': '#f8f9fa'
             }
-        ],
-        persistence=True,
-        persistence_type='local'
+        ]
     )
 
 def update_annotations_table(selected_trait):
@@ -936,11 +961,7 @@ def unified_callback(n_clicks_next, n_clicks_prev, n_clicks_skip, n_clicks_undon
                 'trait': current_trait
             }
             
-            genes_table = create_nearby_genes_table({
-                'CHROM': chrom,
-                'POS': pos,
-                'PVAL': pval
-            })
+            genes_table = create_nearby_genes_table({'CHROM': chrom, 'POS': pos, 'PVAL': pval})
             
             return dash.no_update, dash.no_update, dash.no_update, genes_table, current_snp, update_annotations_table(current_trait), dash.no_update, False, ""
 
@@ -977,28 +998,44 @@ def unified_callback(n_clicks_next, n_clicks_prev, n_clicks_skip, n_clicks_undon
             new_trait = traits[0] if traits else "No traits available"
         elif button_id == 'done-trait-btn':
             print(f"Done button clicked. Selected rows: {selected_rows}, Genes data: {genes_data}")
-            if not selected_rows or not genes_data or not current_snp:
-                show_toast = True
-                toast_message = "Please select at least one gene before marking the trait as done."
-                return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, show_toast, toast_message
             
-            selected_genes = []
-            for row_idx in selected_rows:
-                if row_idx < len(genes_data):
-                    gene = genes_data[row_idx]
-                    selected_genes.append({
-                        'gene_id': gene['gene_id'],
-                        'name': gene['name'],
-                        'distance': gene['distance'],
-                        'short_description': gene['short_description'],
-                        'curator_summary': gene['curator_summary'],
-                        'computational_description': gene['computational_description'],
-                        'defline': gene['defline']
-                    })
+            # Get existing annotations for the trait
+            existing_annotations = trait_data['traits'][current_trait]['annotations']
             
-            if selected_genes:
-                save_annotation(current_trait, current_snp, selected_genes)
-                save_trait_data()  # Make sure to save after adding annotations
+            # If there are selected genes, add them as annotations
+            if selected_rows and genes_data and current_snp:
+                selected_genes = []
+                for row_idx in selected_rows:
+                    if row_idx < len(genes_data):
+                        gene = genes_data[row_idx]
+                        selected_genes.append({
+                            'gene_id': gene['gene_id'],
+                            'name': gene['name'],
+                            'distance': gene['distance'],
+                            'short_description': gene['short_description'],
+                            'curator_summary': gene['curator_summary'],
+                            'computational_description': gene['computational_description'],
+                            'defline': gene['defline']
+                        })
+                
+                if selected_genes:
+                    save_annotation(current_trait, current_snp, selected_genes)
+            # If no genes are selected and no existing annotations, add an empty annotation
+            elif not existing_annotations and current_snp:
+                empty_annotation = {
+                    'chromosome': current_snp['chrom'],
+                    'position': current_snp['pos'],
+                    'p_value': current_snp['pval'],
+                    'gene_id': '',
+                    'gene_name': '',
+                    'distance': '',
+                    'short_description': '',
+                    'curator_summary': '',
+                    'computational_description': '',
+                    'defline': ''
+                }
+                trait_data['traits'][current_trait]['annotations'].append(empty_annotation)
+                save_trait_data()
             
             update_trait_status(current_trait, 'Done')
             traits = get_trait_status(status_filter)
@@ -1060,6 +1097,18 @@ def unified_callback(n_clicks_next, n_clicks_prev, n_clicks_skip, n_clicks_undon
         
         # Get the best SNP for the new trait
         trait_df = gwas_df[gwas_df['TRAIT'] == new_trait]
+        if len(trait_df) == 0:
+            print(f"Warning: No data found for trait {new_trait}")
+            # Try to get the next trait that has data
+            traits = get_trait_status(status_filter)
+            for trait in traits:
+                if len(gwas_df[gwas_df['TRAIT'] == trait]) > 0:
+                    new_trait = trait
+                    trait_df = gwas_df[gwas_df['TRAIT'] == new_trait]
+                    break
+            if len(trait_df) == 0:
+                return "No valid traits available", create_empty_manhattan_plot(), None, "No data available", None, "No data available", get_status_counter_text(), True, "No valid traits found"
+        
         best_snp = trait_df.loc[trait_df['PVAL'].idxmin()]
         
         # Create SNP selection
